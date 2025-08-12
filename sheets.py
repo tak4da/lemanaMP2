@@ -4,6 +4,12 @@ import datetime as dt
 import gspread
 from google.oauth2.service_account import Credentials
 import pytz
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from absolute path
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=ENV_PATH)
 
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SERVICE_JSON_PATH = os.getenv("SERVICE_JSON_PATH", "service_account.json")
