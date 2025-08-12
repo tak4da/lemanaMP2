@@ -79,9 +79,12 @@ def cmd_start(message: types.Message):
 @bot.message_handler(func=lambda m: m.text == "📝 Внести данные")
 def menu_add(message: types.Message):
     STATE[message.chat.id] = {}
-    bot.send_message(message.chat.id, "Выбери отдел:", reply_markup=types.ReplyKeyboardRemove())
-    bot.send_message(message.chat.id, "Список отделов:", reply_markup=None, disable_notification=True)
-    bot.send_message(message.chat.id, " ", reply_markup=departments_kb())
+    bot.send_message(
+        message.chat.id,
+        "Выбери отдел из списка:",
+        reply_markup=departments_kb()
+    )
+
 
 
 @bot.message_handler(func=lambda m: m.text == "📅 Данные за сегодня")
