@@ -3,6 +3,12 @@ import os
 import asyncio
 import logging
 from datetime import datetime
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from absolute path
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=ENV_PATH)
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -12,9 +18,6 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-from dotenv import load_dotenv
-load_dotenv()
 
 from sheets import append_data_bot_row, update_dashboard_today, get_summary_today, get_summary_period
 
