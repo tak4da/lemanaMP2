@@ -1,29 +1,33 @@
-import os
+import os, json
 from datetime import datetime
 import pytz
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Таблица и лист
 WORKSHEET_TITLE = "data_bot"
 
-# Доступы — ожидаем service_account.json в корне проекта
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
 def _client():
-    # Файл сервис-аккаунта читаем из переменной окружения или по умолчанию из service_account.json
+    # 1) Если задана переменная GOOGLE_SERVICE_ACCOUNT_JSON (сырой JSON), используем её
+    raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if raw_json:
+        info = json.loads(raw_json)
+        credentials = Credentials.from_service_account_info(info, scopes=SCOPES)
+        return gspread.authorize(credentials)
+
+    # 2) Иначе читаем файл с путём из GOOGLE_APPLICATION_CREDENTIALS или service_account.json
     sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "service_account.json")
+    if not os.path.isabs(sa_path):
+        # приводим к абсолютному пути относительно текущей директории запуска
+        sa_path = os.path.abspath(sa_path)
     credentials = Credentials.from_service_account_file(sa_path, scopes=SCOPES)
     return gspread.authorize(credentials)
 
 def append_record(spreadsheet_id: str, department: str, home: int, pro: int, leads: int, b2b: int, services: int, timezone: str = "Europe/Moscow"):
-    """Добавляет строку в лист 'data_bot' с 24-часовым временем.
-
-    Колонки: Дата | Время | Отдел | Ключ-карта ДОМ | Ключ-карта ПРО | Лидогенерация | Акции для В2В | Услуги
-    """
     gc = _client()
     sh = gc.open_by_key(spreadsheet_id)
     try:
