@@ -1,4 +1,5 @@
-import os, json
+import os
+import json
 from datetime import datetime
 import pytz
 import gspread
@@ -12,20 +13,29 @@ SCOPES = [
 ]
 
 def _client():
-    # 1) Если задана переменная GOOGLE_SERVICE_ACCOUNT_JSON (сырой JSON), используем её
-    raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if raw_json:
-        info = json.loads(raw_json)
+    # 1) try inline JSON from env GOOGLE_SERVICE_ACCOUNT_JSON
+    inline = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if inline:
+        info = json.loads(inline)
         credentials = Credentials.from_service_account_info(info, scopes=SCOPES)
         return gspread.authorize(credentials)
 
-    # 2) Иначе читаем файл с путём из GOOGLE_APPLICATION_CREDENTIALS или service_account.json
-    sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "service_account.json")
-    if not os.path.isabs(sa_path):
-        # приводим к абсолютному пути относительно текущей директории запуска
-        sa_path = os.path.abspath(sa_path)
-    credentials = Credentials.from_service_account_file(sa_path, scopes=SCOPES)
-    return gspread.authorize(credentials)
+    # 2) then try file path from env GOOGLE_APPLICATION_CREDENTIALS
+    sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if sa_path and os.path.exists(sa_path):
+        credentials = Credentials.from_service_account_file(sa_path, scopes=SCOPES)
+        return gspread.authorize(credentials)
+
+    # 3) fall back to service_account.json in cwd
+    fallback = "service_account.json"
+    if os.path.exists(fallback):
+        credentials = Credentials.from_service_account_file(fallback, scopes=SCOPES)
+        return gspread.authorize(credentials)
+
+    raise FileNotFoundError(
+        "Не найден ключ сервис-аккаунта: задайте GOOGLE_SERVICE_ACCOUNT_JSON или "
+        "GOOGLE_APPLICATION_CREDENTIALS, или положите service_account.json рядом с ботом."
+    )
 
 def append_record(spreadsheet_id: str, department: str, home: int, pro: int, leads: int, b2b: int, services: int, timezone: str = "Europe/Moscow"):
     gc = _client()
