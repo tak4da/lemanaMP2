@@ -1,29 +1,46 @@
-# bot.py
+# bot.py — MP-2 inline-flow bot (aiogram v3)
 import os
 import asyncio
 import logging
+from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 
-from sheets import append_data_bot_row  # см. ранее высланный sheets.py
+# Load .env for BOT_TOKEN (safe for GitHub usage)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
-# --- НАСТРОЙКИ ----------------------------------------------------------------
-# Твой токен:
-TOKEN = "7557353716:AAFo_rYUXohocp9N0axnoX9Nm-e0QYNsMr0"
-# -----------------------------------------------------------------------------
+# ======== External integration (Google Sheets) ========
+# The function must be provided in your sheets.py
+# def append_data_bot_row(department, key_dom, key_pro, leads, b2b, services): ...
+from sheets import append_data_bot_row
 
-# Инициализация бота (новый синтаксис aiogram 3.7+)
-bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+
+# ======== Settings & bootstrap ========
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set. Put it into .env file: BOT_TOKEN=...")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Машина состояний для пошагового ввода метрик
+
+# ======== FSM ========
 class S(StatesGroup):
     dept = State()
     dom = State()
@@ -31,121 +48,235 @@ class S(StatesGroup):
     leads = State()
     b2b = State()
     services = State()
+    manual = State()  # generic manual input for any metric
 
 
-@dp.message(Command("start"))
-async def start(m: Message):
+# ======== Keyboards ========
+def kb_start() -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
-    kb.button(text="Добавить метрики", callback_data="add")
-    await m.answer(
-        "Привет! Я запишу показатели в Google Sheets → лист *data_bot*.\n"
-        "Нажми кнопку и введи значения по шагам.",
-        reply_markup=kb.as_markup(),
+    kb.button(text="Передать новые значения МП-2", callback_data="begin")
+    return kb
+
+def kb_departments() -> InlineKeyboardBuilder:
+    kb = InlineKeyboardBuilder()
+    for i in range(1, 16):
+        kb.button(text=f"Отдел {i}", callback_data=f"dept:{i}")
+    kb.adjust(3)  # 3 per row
+    return kb
+
+def kb_numbers(include_not_actual: bool = False) -> InlineKeyboardBuilder:
+    kb = InlineKeyboardBuilder()
+    # numbers 0..10
+    for i in range(0, 11):
+        kb.button(text=str(i), callback_data=f"num:{i}")
+    kb.adjust(4)  # 4-4-3 layout
+    # manual input
+    kb.button(text="Ввести вручную", callback_data="num:manual")
+    if include_not_actual:
+        kb.button(text="Не актуально", callback_data="num:na")
+    kb.adjust(4)
+    return kb
+
+
+# ======== Helpers ========
+def metric_human(metric: str) -> str:
+    return {
+        "dom": "Ключ‑карта ДОМ",
+        "pro": "Ключ‑карта ПРО",
+        "leads": "Лидогенерация",
+        "b2b": "Акции для B2B",
+        "services": "Услуги",
+    }.get(metric, metric)
+
+async def ask_metric(message: Message, metric: str, include_not_actual: bool = False):
+    """Send question for metric with inline numbers keyboard."""
+    human = metric_human(metric)
+    await message.answer(
+        f"Сколько <b>{human}</b> ты сегодня выполнил(а)?",
+        reply_markup=kb_numbers(include_not_actual).as_markup(),
     )
 
 
-@dp.callback_query(F.data == "add")
-async def cb_add(c: CallbackQuery, state: FSMContext):
-    await c.message.answer("Укажи номер отдела (только число). Пример: 7")
+# ======== Handlers ========
+@dp.message(Command("start", "menu"))
+async def cmd_start(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer(
+        "Привет, я помогу оперативно передать итоги по показателям МП‑2!\n\n"
+        "Контрольное время дня:\n"
+        "1 замер — 14:00\n"
+        "2 замер — 18:00\n"
+        "3 замер — 22:00\n\n"
+        "Каждый раз передавай значения накопительно — с утра до текущей минуты суммарно.",
+        reply_markup=kb_start().as_markup(),
+    )
+
+
+@dp.callback_query(F.data == "begin")
+async def cb_begin(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await c.message.answer("Пожалуйста, выбери свой отдел:", reply_markup=kb_departments().as_markup())
     await state.set_state(S.dept)
     await c.answer()
 
 
-@dp.message(S.dept)
-async def set_dept(m: Message, state: FSMContext):
-    text = (m.text or "").strip()
-    if not text.isdigit():
-        await m.answer("Нужна цифра. Например: 3")
-        return
-    await state.update_data(dept=text)
-    await m.answer("Ключ‑карта ДОМ (число). Пример: 1")
+@dp.callback_query(S.dept, F.data.startswith("dept:"))
+async def cb_dept_selected(c: CallbackQuery, state: FSMContext):
+    dept = c.data.split(":")[1]
+    await state.update_data(dept=dept, dom=0, pro=0, leads=0, b2b=0, services=0)
+    await c.message.answer(f"Ты выбрал(а) отдел: Отдел {dept}")
+    # Ask DOM
+    await ask_metric(c.message, "dom")
     await state.set_state(S.dom)
+    await c.answer()
 
 
-@dp.message(S.dom)
-async def set_dom(m: Message, state: FSMContext):
-    await state.update_data(dom=_to_int(m.text))
-    await m.answer("Ключ‑карта ПРО (число). Пример: 0")
-    await state.set_state(S.pro)
+# ----- Numbers flow for each metric -----
+async def _handle_number_or_manual(c: CallbackQuery, state: FSMContext, metric: str, next_state: State, include_not_actual: bool = False):
+    payload = c.data.split(":", 1)[1]
+    if payload == "manual":
+        # switch to manual input
+        await state.update_data(metric=metric)  # remember what we are inputting
+        await c.message.answer("Введи число вручную (целое, 0 или больше).")
+        await state.set_state(S.manual)
+        await c.answer()
+        return
+    if include_not_actual and payload == "na":
+        value = 0
+    else:
+        value = int(payload)
+
+    await state.update_data(**{metric: value})
+    human = metric_human(metric)
+    await c.message.answer(f"Записано: {human} — {value} шт.")
+
+    # move to next question
+    if next_state is S.pro:
+        await ask_metric(c.message, "pro")
+    elif next_state is S.leads:
+        await ask_metric(c.message, "leads")
+    elif next_state is S.b2b:
+        await ask_metric(c.message, "b2b", include_not_actual=True)
+    elif next_state is S.services:
+        await ask_metric(c.message, "services")
+    else:
+        pass
+    await state.set_state(next_state)
+    await c.answer()
 
 
-@dp.message(S.pro)
-async def set_pro(m: Message, state: FSMContext):
-    await state.update_data(pro=_to_int(m.text))
-    await m.answer("Лидогенерация (число). Пример: 1")
-    await state.set_state(S.leads)
+@dp.callback_query(S.dom, F.data.startswith("num:"))
+async def cb_dom_num(c: CallbackQuery, state: FSMContext):
+    await _handle_number_or_manual(c, state, metric="dom", next_state=S.pro)
 
 
-@dp.message(S.leads)
-async def set_leads(m: Message, state: FSMContext):
-    await state.update_data(leads=_to_int(m.text))
-    await m.answer("Акции для В2В (число). Пример: 0")
-    await state.set_state(S.b2b)
+@dp.callback_query(S.pro, F.data.startswith("num:"))
+async def cb_pro_num(c: CallbackQuery, state: FSMContext):
+    await _handle_number_or_manual(c, state, metric="pro", next_state=S.leads)
 
 
-@dp.message(S.b2b)
-async def set_b2b(m: Message, state: FSMContext):
-    await state.update_data(b2b=_to_int(m.text))
-    await m.answer("Услуги (число). Пример: 1")
-    await state.set_state(S.services)
+@dp.callback_query(S.leads, F.data.startswith("num:"))
+async def cb_leads_num(c: CallbackQuery, state: FSMContext):
+    await _handle_number_or_manual(c, state, metric="leads", next_state=S.b2b, include_not_actual=False)
 
 
-@dp.message(S.services)
-async def finalize(m: Message, state: FSMContext):
-    await state.update_data(services=_to_int(m.text))
+@dp.callback_query(S.b2b, F.data.startswith("num:"))
+async def cb_b2b_num(c: CallbackQuery, state: FSMContext):
+    await _handle_number_or_manual(c, state, metric="b2b", next_state=S.services, include_not_actual=True)
+
+
+@dp.callback_query(S.services, F.data.startswith("num:"))
+async def cb_services_num(c: CallbackQuery, state: FSMContext):
+    payload = c.data.split(":", 1)[1]
+    if payload == "manual":
+        await state.update_data(metric="services")
+        await c.message.answer("Введи число вручную (целое, 0 или больше).")
+        await state.set_state(S.manual)
+        await c.answer()
+        return
+    value = int(payload)
+    await state.update_data(services=value)
+    await c.message.answer(f"Записано: Услуги — {value} шт.")
+    # finalize
+    await finalize_and_write(c.message, state)
+    await c.answer()
+
+
+# ----- Manual input (for any metric) -----
+@dp.message(S.manual)
+async def manual_input(m: Message, state: FSMContext):
+    txt = (m.text or "").strip()
+    if not txt.isdigit():
+        await m.answer("Нужно целое число (0 или больше). Попробуй ещё раз.")
+        return
+    value = int(txt)
     data = await state.get_data()
+    metric: Optional[str] = data.get("metric")
+    if not metric:
+        await m.answer("Произошла ошибка контекста. Запусти /start.")
+        await state.clear()
+        return
 
-    # запись в Google Sheets (лист data_bot)
+    await state.update_data(**{metric: value})
+    human = metric_human(metric)
+    await m.answer(f"Записано: {human} — {value} шт.")
+
+    # move to next metric or finalize
+    if metric == "dom":
+        await ask_metric(m, "pro")
+        await state.set_state(S.pro)
+    elif metric == "pro":
+        await ask_metric(m, "leads")
+        await state.set_state(S.leads)
+    elif metric == "leads":
+        await ask_metric(m, "b2b", include_not_actual=True)
+        await state.set_state(S.b2b)
+    elif metric == "b2b":
+        await ask_metric(m, "services")
+        await state.set_state(S.services)
+    elif metric == "services":
+        await finalize_and_write(m, state)
+
+
+# ======== Finalization ========
+async def finalize_and_write(m: Message, state: FSMContext):
+    data = await state.get_data()
+    dept = data.get("dept", "0")
+    dom = int(data.get("dom", 0))
+    pro = int(data.get("pro", 0))
+    leads = int(data.get("leads", 0))
+    b2b = int(data.get("b2b", 0))
+    services = int(data.get("services", 0))
+
+    await m.answer("⏳ Подождите, ваши данные записываются…")
+
+    # write to sheets
     append_data_bot_row(
-        department=data["dept"],            # можно "7" — в таблице станет "Отдел 7"
-        key_dom=data.get("dom", 0),
-        key_pro=data.get("pro", 0),
-        leads=data.get("leads", 0),
-        b2b=data.get("b2b", 0),
-        services=data.get("services", 0),
+        department=str(dept),
+        key_dom=dom,
+        key_pro=pro,
+        leads=leads,
+        b2b=b2b,
+        services=services,
     )
 
     await m.answer(
         "✅ Данные записаны.\n"
-        f"Отдел {data['dept']}: ДОМ={data.get('dom',0)}, ПРО={data.get('pro',0)}, "
-        f"Лиды={data.get('leads',0)}, B2B={data.get('b2b',0)}, Услуги={data.get('services',0)}"
+        f"Отдел {dept}: ДОМ={dom}, ПРО={pro}, Лиды={leads}, B2B={b2b}, Услуги={services}"
     )
     await state.clear()
 
 
-# Быстрая команда без диалога: /add отдел=7 дом=1 про=0 лиды=1 b2b=0 услуги=1
-@dp.message(Command("add"))
-async def quick_add(m: Message):
-    import re
-    t = (m.text or "").lower()
-
-    def take(key):
-        mo = re.search(rf"{key}\s*=\s*(-?\d+)", t)
-        return int(mo.group(1)) if mo else 0
-
-    dep = take("отдел")
-    append_data_bot_row(
-        department=str(dep),
-        key_dom=take("дом"),
-        key_pro=take("про"),
-        leads=take("лиды"),
-        b2b=take("b2b"),
-        services=take("услуги"),
-    )
-    await m.answer("✅ Записал (команда /add).")
+# ======== Quick command (optional) ========
+@dp.message(Command("cancel"))
+async def cmd_cancel(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("Диалог сброшен. Нажми кнопку ниже, чтобы начать заново.", reply_markup=kb_start().as_markup())
 
 
-def _to_int(x: str) -> int:
-    try:
-        return int(str(x).strip())
-    except Exception:
-        return 0
-
-
+# ======== Entrypoint ========
 async def main():
-    logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
