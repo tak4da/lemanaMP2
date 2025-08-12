@@ -1,18 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-bot.py — Telegram-бот MP2.
-Функции:
-- Внести данные (выбор отдела из 15 и количество 1–5)
-- Показать данные за сегодня
-- Показать накопительно ОТ—ДО
-
-Зависимости: pyTelegramBotAPI, gspread, google-auth
-Переменные окружения:
-- BOT_TOKEN (если не хочешь хранить токен в коде)
-- SERVICE_JSON_PATH, SPREADSHEET_ID, DATA_SHEET_NAME (при необходимости)
-
-Запуск: python3 bot.py
-"""
 from __future__ import annotations
 
 import os
@@ -23,25 +9,26 @@ from telebot import types
 
 import sheets
 
-# === Токен ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7557353716:AAFo_rYUXohocp9N0axnoX9Nm-e0QYNsMr0")
+# === Токен бота (вшито по твоим данным) ===
+BOT_TOKEN = "7557353716:AAFo_rYUXohocp9N0axnoX9Nm-e0QYNsMr0"
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-# === Константы ===
-# Список 15 отделов — поправь под свои реальные названия (порядок важен только визуально)
-DEPARTMENTS = [
-    "Отдел 1", "Отдел 2", "Отдел 3", "Отдел 4", "Отдел 5",
-    "Отдел 6", "Отдел 7", "Отдел 8", "Отдел 9", "Отдел 10",
-    "Отдел 11", "Отдел 12", "Отдел 13", "Отдел 14", "Отдел 15",
+# Категории (как просил)
+CATEGORIES = [
+    ("cards_dom", "Ключ-карта ДОМ"),
+    ("cards_pro", "Ключ-карта ПРО"),
+    ("leads", "Лидогенерация"),
+    ("b2b", "Акции для B2B"),
+    ("services", "Услуги"),
 ]
-
 QTY_CHOICES = ["1", "2", "3", "4", "5"]
 
-# Хранилище состояний: chat_id -> {"dep": str, "qty": int}
-STATE = {}
+# Память состояний
+STATE = {}  # chat_id -> {...}
 
-# === Клавиатуры ===
+
+# ====== Клавиатуры ======
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("📝 Внести данные"))
@@ -50,9 +37,9 @@ def main_menu():
     return kb
 
 
-def departments_kb():
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    buttons = [types.InlineKeyboardButton(text=dep, callback_data=f"dep::{dep}") for dep in DEPARTMENTS]
+def categories_kb():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [types.InlineKeyboardButton(text=label, callback_data=f"cat::{key}") for key, label in CATEGORIES]
     kb.add(*buttons)
     return kb
 
@@ -60,31 +47,39 @@ def departments_kb():
 def qty_kb():
     kb = types.InlineKeyboardMarkup(row_width=5)
     buttons = [types.InlineKeyboardButton(text=q, callback_data=f"qty::{q}") for q in QTY_CHOICES]
+    buttons.append(types.InlineKeyboardButton(text="Ввести вручную", callback_data="qty::manual"))
     kb.add(*buttons)
     return kb
 
 
-# === Команды ===
-@bot.message_handler(commands=["start", "help"])
+# ====== Служебное ======
+def user_text(user: types.User) -> str:
+    return (f"@{user.username}" if user.username else f"{user.first_name or ''} {user.last_name or ''}".strip()) or str(user.id)
+
+
+def reset_state(chat_id: int):
+    STATE.pop(chat_id, None)
+
+
+def reset_to_start(chat_id: int):
+    """Сообщение 'Данные записаны' и возврат к стартовому меню."""
+    bot.send_message(chat_id, "✅ Данные записаны")
+    bot.send_message(chat_id, "Привет! Это MP2-бот. Что сделать?", reply_markup=main_menu())
+    reset_state(chat_id)
+
+
+# ====== Команды ======
+@bot.message_handler(commands=["start", "help"]) 
 def cmd_start(message: types.Message):
-    bot.send_message(
-        message.chat.id,
-        "Привет! Это MP2-бот.\n\n"
-        "Что сделать?",
-        reply_markup=main_menu(),
-    )
+    reset_state(message.chat.id)
+    bot.send_message(message.chat.id, "Привет! Это MP2-бот. Что сделать?", reply_markup=main_menu())
 
 
-# === Обработка главного меню ===
+# ====== Главное меню ======
 @bot.message_handler(func=lambda m: m.text == "📝 Внести данные")
 def menu_add(message: types.Message):
-    STATE[message.chat.id] = {}
-    bot.send_message(
-        message.chat.id,
-        "Выбери отдел из списка:",
-        reply_markup=departments_kb()
-    )
-
+    reset_state(message.chat.id)
+    bot.send_message(message.chat.id, "Выбери категорию:", reply_markup=categories_kb())
 
 
 @bot.message_handler(func=lambda m: m.text == "📅 Данные за сегодня")
@@ -109,10 +104,7 @@ def ask_date_to(message: types.Message):
         bot.register_next_step_handler(msg, ask_date_to)
         return
 
-    # Сохраним временно
-    STATE[message.chat.id] = STATE.get(message.chat.id, {})
-    STATE[message.chat.id]["date_from"] = dfrom
-
+    STATE[message.chat.id] = {"date_from": dfrom}
     msg = bot.send_message(message.chat.id, "Теперь введи дату ДО в формате ДД.ММ.ГГГГ:")
     bot.register_next_step_handler(msg, show_range_summary)
 
@@ -126,8 +118,7 @@ def show_range_summary(message: types.Message):
         bot.register_next_step_handler(msg, show_range_summary)
         return
 
-    st = STATE.get(message.chat.id, {})
-    dfrom = st.get("date_from")
+    dfrom = STATE.get(message.chat.id, {}).get("date_from")
     if not dfrom:
         bot.send_message(message.chat.id, "Не найдена дата ОТ. Попробуй снова.", reply_markup=main_menu())
         return
@@ -135,68 +126,84 @@ def show_range_summary(message: types.Message):
     agg, total = sheets.aggregate_by_period(dfrom, dto)
     text = sheets.render_summary(agg, total, f"Сводка за период {dfrom} — {dto}")
     bot.send_message(message.chat.id, text, reply_markup=main_menu())
+    reset_state(message.chat.id)
 
 
-# === Callback-и для инлайн кнопок ===
-@bot.callback_query_handler(func=lambda c: c.data.startswith("dep::"))
-def pick_department(callback: types.CallbackQuery):
-    dep = callback.data.split("::", 1)[1]
+# ====== Inline callbacks ======
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cat::"))
+def pick_category(callback: types.CallbackQuery):
+    key = callback.data.split("::", 1)[1]
+    label = next((lbl for k, lbl in CATEGORIES if k == key), key)
     chat_id = callback.message.chat.id
-    STATE[chat_id] = STATE.get(chat_id, {})
-    STATE[chat_id]["dep"] = dep
 
-    bot.answer_callback_query(callback.id, text=f"Отдел: {dep}")
+    STATE[chat_id] = {"category_key": key, "category_label": label}
+    bot.answer_callback_query(callback.id, text=f"{label}")
     bot.edit_message_text(
         chat_id=chat_id,
         message_id=callback.message.message_id,
-        text=f"Отдел выбран: <b>{dep}</b>\nТеперь выбери количество:",
-        reply_markup=qty_kb(),
+        text=f"Сколько «{label}» сегодня?", 
+        reply_markup=qty_kb()
     )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("qty::"))
 def pick_qty(callback: types.CallbackQuery):
-    qty_text = callback.data.split("::", 1)[1]
+    choice = callback.data.split("::", 1)[1]
     chat_id = callback.message.chat.id
-    st = STATE.get(chat_id, {})
-    dep = st.get("dep")
+    label = STATE.get(chat_id, {}).get("category_label")
 
-    if not dep:
-        bot.answer_callback_query(callback.id, text="Сначала выбери отдел.")
+    if not label:
+        bot.answer_callback_query(callback.id, text="Сначала выбери категорию.")
         return
 
-    qty = int(qty_text)
+    if choice == "manual":
+        bot.answer_callback_query(callback.id)
+        # Убираем инлайн-клавиатуру у предыдущего сообщения
+        bot.edit_message_text(chat_id=chat_id, message_id=callback.message.message_id, text=f"Введи число для «{label}»: ")
+        msg = bot.send_message(chat_id, "Например: 7")
+        bot.register_next_step_handler(msg, handle_manual_qty, label, callback.message.message_id)
+        return
 
-    # Кто пользователь (для записи)
-    user_txt = (
-        f"@{callback.from_user.username}" if callback.from_user.username else
-        f"{callback.from_user.first_name or ''} {callback.from_user.last_name or ''}".strip()
-    ) or str(callback.from_user.id)
+    qty = int(choice)
+    save_and_finish(callback, label, qty)
 
-    ok, msg = sheets.append_entry(department=dep, qty=qty, user=user_txt, ref="non")
 
+def handle_manual_qty(message: types.Message, label: str, to_edit_message_id: int):
+    chat_id = message.chat.id
+    txt = message.text.strip().replace(",", ".")
+    if not txt.isdigit():
+        msg = bot.send_message(chat_id, "Это не целое число. Введи количество ещё раз:")
+        bot.register_next_step_handler(msg, handle_manual_qty, label, to_edit_message_id)
+        return
+    qty = int(txt)
+    # Обновим старое сообщение (без клавиатуры), потом финальное действие
+    try:
+        bot.edit_message_text(chat_id=chat_id, message_id=to_edit_message_id, text=f"Ввод: {qty}")
+    except Exception:
+        pass
+    # Сохраняем и выходим в старт
+    ok, _ = sheets.append_entry(department=label, qty=qty, user=user_text(message.from_user), ref="non")
+    reset_to_start(chat_id)
+
+
+def save_and_finish(callback: types.CallbackQuery, label: str, qty: int):
+    chat_id = callback.message.chat.id
+    # Сохраняем
+    ok, _ = sheets.append_entry(department=label, qty=qty, user=user_text(callback.from_user), ref="non")
     bot.answer_callback_query(callback.id)
-    if ok:
+    # Убираем инлайн-кнопки редактированием текста (без reply-клавиатур!)
+    try:
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=callback.message.message_id,
-            text=(
-                f"✅ Записано в таблицу:\n"
-                f"Отдел: <b>{dep}</b>\n"
-                f"Количество: <b>{qty}</b>\n\n"
-                f"Ещё что-то сделать?"
-            ),
-            reply_markup=main_menu(),
+            text=f"Категория: <b>{label}</b> — {qty}"
         )
-    else:
-        bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=callback.message.message_id,
-            text=f"❌ Не удалось записать данные. {msg}",
-            reply_markup=main_menu(),
-        )
+    except Exception:
+        pass
+    # Сообщение 'Данные записаны' и возврат к старту
+    reset_to_start(chat_id)
 
 
 if __name__ == "__main__":
-    print("MP2-бот запущен. Ожидаю команды...")
+    print("MP2-бот запущен.")
     bot.infinity_polling(skip_pending=True, allowed_updates=telebot.util.update_types)
