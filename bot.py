@@ -24,7 +24,7 @@ from telebot import types
 import sheets
 
 # === Токен ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_СЮДА_ТОКЕН")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7557353716:AAFo_rYUXohocp9N0axnoX9Nm-e0QYNsMr0")
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
