@@ -1,154 +1,238 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-import telebot
-from telebot import types
-import sheets
+import logging
+import os
+from datetime import datetime
+import pytz
 
-BOT_TOKEN = "7557353716:AAFo_rYUXohocp9N0axnoX9Nm-e0QYNsMr0"
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    ContextTypes, ConversationHandler
+)
 
-DEPARTMENTS = [f"Отдел {i}" for i in range(1, 16)]
-CATEGORIES = [
-    ("cards_dom", "Ключ-карта ДОМ"),
-    ("cards_pro", "Ключ-карта ПРО"),
-    ("leads", "Лидогенерация"),
-    ("b2b", "Акции для B2B"),
-    ("services", "Услуги"),
-]
-QTY_CHOICES = ["1", "2", "3", "4", "5"]
-STATE = {}
+# === CONFIG ===
+TOKEN = "7557353716:AAFo_rYUXohocp9N0axnoX9Nm-e0QYNsMr0"  # ваш токен бота
+SPREADSHEET_ID = "1VNLbyz58pWLm9wCQ5mhQar90dO4Y8kKpgRT8NfS7HVs"  # ваш spreadsheet_id
+TIMEZONE = os.getenv("BOT_TIMEZONE", "Europe/Moscow")  # можно поменять через переменную окружения
 
-def main_menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(types.KeyboardButton("📝 Внести данные"))
-    kb.add(types.KeyboardButton("📅 Данные за сегодня"))
-    kb.add(types.KeyboardButton("📈 Накопительно ОТ—ДО"))
-    return kb
+# === SHEETS ===
+from sheets import append_record
 
-def departments_kb():
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    kb.add(*[types.InlineKeyboardButton(d, callback_data=f"dep::{d}") for d in DEPARTMENTS])
-    return kb
+# === STATES ===
+DEPT, HOME, PRO, LEADS, B2B, SERVICES = range(6)
 
-def categories_kb():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(*[types.InlineKeyboardButton(lbl, callback_data=f"cat::{key}") for key, lbl in CATEGORIES])
-    return kb
+# === LOGGING ===
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-def qty_kb():
-    kb = types.InlineKeyboardMarkup(row_width=5)
-    kb.add(*[types.InlineKeyboardButton(q, callback_data=f"qty::{q}") for q in QTY_CHOICES])
-    kb.add(types.InlineKeyboardButton("Ввести вручную", callback_data="qty::manual"))
-    return kb
+# === KEYBOARDS ===
+def dept_keyboard():
+    # 1–15 отделов
+    buttons = []
+    row = []
+    for i in range(1, 16):
+        row.append(InlineKeyboardButton(str(i), callback_data=f"dept:{i}"))
+        if len(row) == 5:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("Отмена", callback_data="cancel")])
+    return InlineKeyboardMarkup(buttons)
 
-def user_text(user: types.User) -> str:
-    return (f"@{user.username}" if user.username else f"{user.first_name or ''} {user.last_name or ''}".strip()) or str(user.id)
+def one_to_five_keyboard(prefix):
+    buttons = [
+        [
+            InlineKeyboardButton("1", callback_data=f"{prefix}:1"),
+            InlineKeyboardButton("2", callback_data=f"{prefix}:2"),
+            InlineKeyboardButton("3", callback_data=f"{prefix}:3"),
+            InlineKeyboardButton("4", callback_data=f"{prefix}:4"),
+            InlineKeyboardButton("5", callback_data=f"{prefix}:5"),
+        ],
+        [InlineKeyboardButton("Отмена", callback_data="cancel")]
+    ]
+    return InlineKeyboardMarkup(buttons)
 
-def reset_state(chat_id: int):
-    STATE.pop(chat_id, None)
+# === HELPERS ===
+def now_strings():
+    tz = pytz.timezone(TIMEZONE)
+    now = datetime.now(tz)
+    return now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
 
-def reset_to_start(chat_id: int):
-    bot.send_message(chat_id, "✅ Данные записаны")
-    bot.send_message(chat_id, "Привет! Это MP2-бот. Что сделать?", reply_markup=main_menu())
-    reset_state(chat_id)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    text = (
+        "Выберите отдел (1–15):\n"
+        "Заполните форму по шагам. В любой момент можно нажать «Отмена»."
+    )
+    if update.message:
+        await update.message.reply_text(text, reply_markup=dept_keyboard())
+    else:
+        # на случай повторного запуска через кнопку
+        await update.callback_query.message.reply_text(text, reply_markup=dept_keyboard())
+    return DEPT
 
-@bot.message_handler(commands=["start", "help"])
-def cmd_start(message: types.Message):
-    reset_to_start(message.chat.id)
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data.clear()
+    await q.edit_message_text("Отменено. Наберите /start, чтобы начать заново.")
+    return ConversationHandler.END
 
-@bot.message_handler(func=lambda m: m.text == "📝 Внести данные")
-def menu_add(message: types.Message):
-    reset_state(message.chat.id)
-    bot.send_message(message.chat.id, "Выбери отдел:", reply_markup=departments_kb())
+async def choose_dept(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data  # dept:1..15
+    _, num = data.split(":")
+    context.user_data["dept"] = int(num)
 
-@bot.message_handler(func=lambda m: m.text == "📅 Данные за сегодня")
-def menu_today(message: types.Message):
-    agg, total, date_str = sheets.aggregate_today(group_by="category")
-    bot.send_message(message.chat.id, sheets.render_summary(agg, total, f"Сводка за сегодня ({date_str})"),
-                     reply_markup=main_menu())
+    await q.edit_message_text(
+        "Сколько ключ-карт для дома ты сегодня выдал(а)?",
+        reply_markup=one_to_five_keyboard("home")
+    )
+    return HOME
 
-@bot.message_handler(func=lambda m: m.text == "📈 Накопительно ОТ—ДО")
-def menu_range(message: types.Message):
-    msg = bot.send_message(message.chat.id, "Введи дату ОТ (ДД.ММ.ГГГГ):")
-    bot.register_next_step_handler(msg, ask_date_to)
+async def choose_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, val = q.data.split(":")
+    context.user_data["home"] = int(val)
 
-def ask_date_to(message: types.Message):
-    from datetime import datetime
+    await q.edit_message_text(
+        "Сколько ключ-карт ПРО ты сегодня выдал(а)?",
+        reply_markup=one_to_five_keyboard("pro")
+    )
+    return PRO
+
+async def choose_pro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, val = q.data.split(":")
+    context.user_data["pro"] = int(val)
+
+    await q.edit_message_text(
+        "Сколько лидов ты сегодня сгенерил(а)?",
+        reply_markup=one_to_five_keyboard("leads")
+    )
+    return LEADS
+
+async def choose_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, val = q.data.split(":")
+    context.user_data["leads"] = int(val)
+
+    await q.edit_message_text(
+        "Сколько акций для B2B ты сегодня продал(а)?",
+        reply_markup=one_to_five_keyboard("b2b")
+    )
+    return B2B
+
+async def choose_b2b(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, val = q.data.split(":")
+    context.user_data["b2b"] = int(val)
+
+    await q.edit_message_text(
+        "Сколько услуг ты сегодня продал(а)?",
+        reply_markup=one_to_five_keyboard("services")
+    )
+    return SERVICES
+
+async def choose_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, val = q.data.split(":")
+    context.user_data["services"] = int(val)
+
+    # === запись в Google Sheets ===
+    dept_num = context.user_data.get("dept")
+    dept_name = f"Отдел {dept_num}"
+    home = context.user_data.get("home", 0)
+    pro = context.user_data.get("pro", 0)
+    leads = context.user_data.get("leads", 0)
+    b2b = context.user_data.get("b2b", 0)
+    services = context.user_data.get("services", 0)
+
     try:
-        dfrom = datetime.strptime(message.text.strip(), "%d.%m.%Y").strftime("%Y-%m-%d")
-    except Exception:
-        msg = bot.send_message(message.chat.id, "Ошибка формата. Введи дату ОТ (ДД.ММ.ГГГГ):")
-        bot.register_next_step_handler(msg, ask_date_to)
-        return
-    STATE[message.chat.id] = {"date_from": dfrom}
-    msg = bot.send_message(message.chat.id, "Теперь дата ДО (ДД.ММ.ГГГГ):")
-    bot.register_next_step_handler(msg, show_range_summary)
+        date_str, time_str = now_strings()
+        append_record(
+            spreadsheet_id=SPREADSHEET_ID,
+            department=dept_name,
+            home=home,
+            pro=pro,
+            leads=leads,
+            b2b=b2b,
+            services=services,
+            timezone=TIMEZONE,
+        )
+        summary = (
+            f"✅ Записано в таблицу:\n"
+            f"Дата: {date_str}\n"
+            f"Время: {time_str}\n"
+            f"Отдел: {dept_name}\n"
+            f"Ключ-карта ДОМ: {home}\n"
+            f"Ключ-карта ПРО: {pro}\n"
+            f"Лидогенерация: {leads}\n"
+            f"Акции для В2В: {b2b}\n"
+            f"Услуги: {services}\n\n"
+            f"Чтобы внести новую запись — /start"
+        )
+        await q.edit_message_text(summary)
+    except Exception as e:
+        logger.exception("Ошибка записи: %s", e)
+        await q.edit_message_text(
+            "⚠️ Произошла ошибка при записи в таблицу. Проверьте креды и доступ.\n"
+            "Попробуйте снова: /start"
+        )
+    finally:
+        context.user_data.clear()
 
-def show_range_summary(message: types.Message):
-    from datetime import datetime
-    try:
-        dto = datetime.strptime(message.text.strip(), "%d.%m.%Y").strftime("%Y-%m-%d")
-    except Exception:
-        msg = bot.send_message(message.chat.id, "Ошибка формата. Дата ДО (ДД.ММ.ГГГГ):")
-        bot.register_next_step_handler(msg, show_range_summary)
-        return
-    dfrom = STATE.get(message.chat.id, {}).get("date_from")
-    if not dfrom:
-        bot.send_message(message.chat.id, "Не найдена дата ОТ.", reply_markup=main_menu())
-        return
-    agg, total = sheets.aggregate_by_period(dfrom, dto, group_by="category")
-    bot.send_message(message.chat.id, sheets.render_summary(agg, total, f"Сводка за период {dfrom} — {dto}"),
-                     reply_markup=main_menu())
-    reset_state(message.chat.id)
+    return ConversationHandler.END
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("dep::"))
-def pick_department(callback: types.CallbackQuery):
-    dep = callback.data.split("::", 1)[1]
-    STATE[callback.message.chat.id] = {"dep": dep}
-    bot.answer_callback_query(callback.id, text=f"Отдел: {dep}")
-    bot.edit_message_text(chat_id=callback.message.chat.id, message_id=callback.message.message_id,
-                          text=f"Отдел выбран: <b>{dep}</b>\nТеперь выбери категорию:", reply_markup=categories_kb())
+def main():
+    application = ApplicationBuilder().token(TOKEN).build()
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("cat::"))
-def pick_category(callback: types.CallbackQuery):
-    key = callback.data.split("::", 1)[1]
-    label = next((lbl for k, lbl in CATEGORIES if k == key), key)
-    st = STATE.get(callback.message.chat.id, {})
-    st["cat_key"] = key
-    st["cat_label"] = label
-    STATE[callback.message.chat.id] = st
-    bot.answer_callback_query(callback.id, text=label)
-    dep = st.get("dep", "—")
-    bot.edit_message_text(chat_id=callback.message.chat.id, message_id=callback.message.message_id,
-                          text=f"Отдел: <b>{dep}</b>\nКатегория: <b>{label}</b>\nСколько?", reply_markup=qty_kb())
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            DEPT: [
+                CallbackQueryHandler(cancel, pattern="^cancel$"),
+                CallbackQueryHandler(choose_dept, pattern="^dept:\\d+$"),
+            ],
+            HOME: [
+                CallbackQueryHandler(cancel, pattern="^cancel$"),
+                CallbackQueryHandler(choose_home, pattern="^home:[1-5]$"),
+            ],
+            PRO: [
+                CallbackQueryHandler(cancel, pattern="^cancel$"),
+                CallbackQueryHandler(choose_pro, pattern="^pro:[1-5]$"),
+            ],
+            LEADS: [
+                CallbackQueryHandler(cancel, pattern="^cancel$"),
+                CallbackQueryHandler(choose_leads, pattern="^leads:[1-5]$"),
+            ],
+            B2B: [
+                CallbackQueryHandler(cancel, pattern="^cancel$"),
+                CallbackQueryHandler(choose_b2b, pattern="^b2b:[1-5]$"),
+            ],
+            SERVICES: [
+                CallbackQueryHandler(cancel, pattern="^cancel$"),
+                CallbackQueryHandler(choose_services, pattern="^services:[1-5]$"),
+            ],
+        },
+        fallbacks=[CommandHandler("start", start)],
+        allow_reentry=True,
+    )
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("qty::"))
-def pick_qty(callback: types.CallbackQuery):
-    choice = callback.data.split("::", 1)[1]
-    st = STATE.get(callback.message.chat.id, {})
-    dep = st.get("dep")
-    label = st.get("cat_label")
-    if choice == "manual":
-        bot.answer_callback_query(callback.id)
-        bot.edit_message_text(chat_id=callback.message.chat.id, message_id=callback.message.message_id,
-                              text=f"Отдел: <b>{dep}</b>\nКатегория: <b>{label}</b>\nВведи число вручную:")
-        msg = bot.send_message(callback.message.chat.id, "Например: 7")
-        bot.register_next_step_handler(msg, handle_manual_qty, dep, label)
-        return
-    qty = int(choice)
-    save_and_finish(callback.message.chat.id, dep, label, qty, callback.from_user)
+    application.add_handler(conv)
 
-def handle_manual_qty(message: types.Message, dep: str, label: str):
-    if not message.text.strip().isdigit():
-        msg = bot.send_message(message.chat.id, "Это не число. Введи ещё раз:")
-        bot.register_next_step_handler(msg, handle_manual_qty, dep, label)
-        return
-    qty = int(message.text.strip())
-    save_and_finish(message.chat.id, dep, label, qty, message.from_user)
+    # safety: catch-all for stray presses of "Отмена"
+    application.add_handler(CallbackQueryHandler(cancel, pattern="^cancel$"))
 
-def save_and_finish(chat_id: int, dep: str, label: str, qty: int, user):
-    sheets.append_entry(department=dep, category=label, qty=qty, user=user_text(user), ref="non")
-    reset_to_start(chat_id)
+    application.run_polling(allowed_updates=["message", "callback_query"])
 
 if __name__ == "__main__":
-    bot.infinity_polling(skip_pending=True, allowed_updates=telebot.util.update_types)
+    main()
