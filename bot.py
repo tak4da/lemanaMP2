@@ -157,9 +157,9 @@ def on_answer(call):
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                text=(
-                    "✅ Данные отправлены!
-"
+                text="""✅ Данные отправлены!
+Отдел: ...
+"""
                     f"Отдел: <b>{dep}</b>
 "
                     f"Дата: <b>{date_str}</b>, Время: <b>{time_str}</b>
