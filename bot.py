@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 Бот опроса с выбором 1–3 и кнопкой "Не актуально".
-Шаги:
-1) Выбор отдела (1–15).
-2) 5 вопросов (1,2,3, Не актуально).
-3) Запись в Google Sheets (лист "data_bot").
+Изменения:
+- Убраны лишние команды меню (оставлены только /start и /cancel).
+- Кнопки ответов: верхний ряд [1][2][3], нижний ряд — одна широкая [Не актуально].
 """
 import os
 import time
 from datetime import datetime
 import telebot
 from telebot import types
+from telebot.types import BotCommand
 
 from sheets import SheetClient
 
@@ -24,6 +24,17 @@ TIME_FORMAT = "%H:%M"  # 24-часовой формат
 DATE_FORMAT = "%Y-%m-%d"
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
+
+# Задаём ТОЛЬКО нужные команды меню, чтобы скрыть старые "Данные за сегодня", "Накопительно ОТ—ДО"
+try:
+    bot.set_my_commands([
+        BotCommand("start", "Начать опрос"),
+        BotCommand("cancel", "Сбросить опрос"),
+    ])
+except Exception:
+    # Если метод недоступен/ошибка — просто пропустим
+    pass
+
 sheets = SheetClient(spreadsheet_id=SPREADSHEET_ID, worksheet_name=DATA_SHEET_NAME)
 
 SESSIONS = {}
@@ -37,13 +48,14 @@ QUESTIONS = [
 ]
 
 def answer_keyboard(q_index: int) -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=4)
-    kb.add(
-        types.InlineKeyboardButton("1", callback_data=f"q{q_index}:1"),
-        types.InlineKeyboardButton("2", callback_data=f"q{q_index}:2"),
-        types.InlineKeyboardButton("3", callback_data=f"q{q_index}:3"),
-        types.InlineKeyboardButton("Не актуально", callback_data=f"q{q_index}:na"),
-    )
+    """Первый ряд: 1,2,3. Второй ряд: Не актуально (широкая из-за длинного текста)."""
+    kb = types.InlineKeyboardMarkup()
+    b1 = types.InlineKeyboardButton("1", callback_data=f"q{q_index}:1")
+    b2 = types.InlineKeyboardButton("2", callback_data=f"q{q_index}:2")
+    b3 = types.InlineKeyboardButton("3", callback_data=f"q{q_index}:3")
+    bna = types.InlineKeyboardButton("Не актуально", callback_data=f"q{q_index}:na")
+    kb.row(b1, b2, b3)
+    kb.row(bna)
     return kb
 
 def department_keyboard() -> types.InlineKeyboardMarkup:
