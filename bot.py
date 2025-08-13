@@ -2,11 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Бот опроса с выбором 1–3 и кнопкой "Не актуально".
-Логика:
-1) Пользователь выбирает отдел (1–15).
-2) Ответы на 5 вопросов, каждый: 1, 2, 3, Не актуально.
-3) После завершения запись в Google Sheets (лист "data_bot").
-Автор: MP2
+Шаги:
+1) Выбор отдела (1–15).
+2) 5 вопросов (1,2,3, Не актуально).
+3) Запись в Google Sheets (лист "data_bot").
 """
 import os
 import time
@@ -17,25 +16,18 @@ from telebot import types
 from sheets import SheetClient
 
 # ==== НАСТРОЙКИ ====
-# Твой токен бота
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7557353716:AAFo_rYUXohocp9N0axnoX9Nm-e0QYNsMr0")
-# ID таблицы
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1VNLbyz58pWLm9wCQ5mhQar90dO4Y8kKpgRT8NfS7HVs")
-# Имя листа с данными
 DATA_SHEET_NAME = os.getenv("DATA_SHEET_NAME", "data_bot")
 
-# Часовой пояс пользователя: Европа/Амстердам (UTC+2 или +1 зимний). Для простоты пишем время локали сервера в 24ч формате
-# Если нужно строго по Амстердаму — можно подключить pytz/zoneinfo и выставить timezone.
 TIME_FORMAT = "%H:%M"  # 24-часовой формат
 DATE_FORMAT = "%Y-%m-%d"
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
 sheets = SheetClient(spreadsheet_id=SPREADSHEET_ID, worksheet_name=DATA_SHEET_NAME)
 
-# Пул сессий пользователей
 SESSIONS = {}
 
-# Вопросы и соответствующие имена столбцов
 QUESTIONS = [
     ("Сколько <b>ключ-карт для дома</b> ты сегодня выдал(а)?", "keycards_home"),
     ("Сколько <b>ключ-карт ПРО</b> ты сегодня выдал(а)?", "keycards_pro"),
@@ -44,7 +36,6 @@ QUESTIONS = [
     ("Сколько <b>услуг</b> ты сегодня продал(а)?", "services"),
 ]
 
-# Кнопки ответа 1–3 + Не актуально
 def answer_keyboard(q_index: int) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=4)
     kb.add(
@@ -55,7 +46,6 @@ def answer_keyboard(q_index: int) -> types.InlineKeyboardMarkup:
     )
     return kb
 
-# Клавиатура выбора отдела 1–15
 def department_keyboard() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=5)
     buttons = [types.InlineKeyboardButton(str(i), callback_data=f"dep:{i}") for i in range(1, 16)]
@@ -71,8 +61,7 @@ def start_session(user_id):
     }
 
 def get_username(message):
-    name = message.from_user.full_name or message.from_user.username or str(message.from_user.id)
-    return name
+    return message.from_user.full_name or message.from_user.username or str(message.from_user.id)
 
 @bot.message_handler(commands=['start', 'help'])
 def cmd_start(message):
@@ -93,7 +82,6 @@ def on_department(call):
     SESSIONS[user_id]["department"] = dep
     SESSIONS[user_id]["current_q"] = 0
 
-    # Задаём первый вопрос
     q_text, _ = QUESTIONS[0]
     bot.edit_message_text(
         chat_id=call.message.chat.id,
@@ -116,10 +104,8 @@ def on_answer(call):
         bot.answer_callback_query(call.id, "Ошибка данных.")
         return
 
-    # Сохраняем ответ
     SESSIONS[user_id]["answers"][q_index] = None if value == "na" else int(value)
 
-    # Переходим к следующему вопросу
     next_q = q_index + 1
     if next_q < len(QUESTIONS):
         SESSIONS[user_id]["current_q"] = next_q
@@ -127,16 +113,14 @@ def on_answer(call):
         bot.edit_message_text(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            text=f"{q_text}",
+            text=q_text,
             reply_markup=answer_keyboard(next_q)
         )
     else:
-        # Все ответы собраны — сохраняем
         name = get_username(call.message)
         dep = SESSIONS[user_id]["department"]
         answers = SESSIONS[user_id]["answers"]
 
-        # Формируем запись в таблицу
         now = datetime.now()
         date_str = now.strftime(DATE_FORMAT)
         time_str = now.strftime(TIME_FORMAT)
@@ -147,34 +131,28 @@ def on_answer(call):
             "user": name,
             "department": dep,
         }
-        # добавляем все вопросы
         for idx, (_qtext, colname) in enumerate(QUESTIONS):
             row[colname] = answers.get(idx)
 
-        # Пишем в Google Sheets
         ok, err = sheets.append_row(row)
         if ok:
+            success_text = (
+                "✅ Данные отправлены!\n"
+                f"Отдел: <b>{dep}</b>\n"
+                f"Дата: <b>{date_str}</b>, Время: <b>{time_str}</b>\n\n"
+                "Если нужно — нажми /start, чтобы заполнить ещё раз."
+            )
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                text="""✅ Данные отправлены!
-Отдел: ...
-"""
-                    f"Отдел: <b>{dep}</b>
-"
-                    f"Дата: <b>{date_str}</b>, Время: <b>{time_str}</b>
-
-"
-                    "Если нужно — нажми /start, чтобы заполнить ещё раз."
-                ),
+                text=success_text
             )
         else:
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                text=f"❌ Не удалось записать данные: {err}",
+                text=f"❌ Не удалось записать данные: {err}"
             )
-        # Чистим сессию
         start_session(user_id)
 
 @bot.message_handler(commands=['cancel'])
