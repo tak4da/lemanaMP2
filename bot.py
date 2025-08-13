@@ -2,11 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Бот опроса с выбором 1–3 и кнопкой "Не актуально".
-Дополнения:
-- Часовой пояс: Самара (UTC+4)
-- Автоудаление старых сообщений
-- Кнопка "ЗАПОЛНИТЬ НОВЫЕ" после внесения данных
-- Сохранение состояния в JSON между перезапусками
+Фикс: не зависает сообщение выбора отдела — мы удаляем сообщение,
+с которого пришёл callback (dep/q), плюс последнее сохранённое.
 """
 import os
 import time
@@ -26,12 +23,11 @@ DATA_SHEET_NAME = os.getenv("DATA_SHEET_NAME", "data_bot")
 SESSIONS_FILE = "sessions.json"
 SAMARA_TZ = pytz.timezone("Europe/Samara")
 
-TIME_FORMAT = "%H:%M"  # 24-часовой формат
+TIME_FORMAT = "%H:%M"
 DATE_FORMAT = "%Y-%m-%d"
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
 
-# Меню команд
 try:
     bot.set_my_commands([
         BotCommand("start", "Начать опрос"),
@@ -42,7 +38,6 @@ except Exception:
 
 sheets = SheetClient(spreadsheet_id=SPREADSHEET_ID, worksheet_name=DATA_SHEET_NAME)
 
-# ====== Состояния ======
 def load_sessions():
     if os.path.exists(SESSIONS_FILE):
         try:
@@ -68,12 +63,12 @@ QUESTIONS = [
 
 def answer_keyboard(q_index: int) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup()
-    b1 = types.InlineKeyboardButton("1", callback_data=f"q{q_index}:1")
-    b2 = types.InlineKeyboardButton("2", callback_data=f"q{q_index}:2")
-    b3 = types.InlineKeyboardButton("3", callback_data=f"q{q_index}:3")
-    bna = types.InlineKeyboardButton("Не актуально", callback_data=f"q{q_index}:na")
-    kb.row(b1, b2, b3)
-    kb.row(bna)
+    kb.row(
+        types.InlineKeyboardButton("1", callback_data=f"q{q_index}:1"),
+        types.InlineKeyboardButton("2", callback_data=f"q{q_index}:2"),
+        types.InlineKeyboardButton("3", callback_data=f"q{q_index}:3"),
+    )
+    kb.row(types.InlineKeyboardButton("Не актуально", callback_data=f"q{q_index}:na"))
     return kb
 
 def department_keyboard() -> types.InlineKeyboardMarkup:
@@ -87,7 +82,7 @@ def restart_keyboard() -> types.InlineKeyboardMarkup:
     kb.add(types.InlineKeyboardButton("📝 ЗАПОЛНИТЬ НОВЫЕ", callback_data="start_new"))
     return kb
 
-def start_session(user_id):
+def start_session(user_id: str):
     SESSIONS[user_id] = {
         "department": None,
         "answers": {},
@@ -100,13 +95,17 @@ def start_session(user_id):
 def get_username(message):
     return message.from_user.full_name or message.from_user.username or str(message.from_user.id)
 
-def delete_last_message(chat_id, user_id):
+def delete_message_safe(chat_id, message_id):
+    if not message_id:
+        return
+    try:
+        bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+def delete_last_message(chat_id, user_id: str):
     last_id = SESSIONS.get(user_id, {}).get("last_msg_id")
-    if last_id:
-        try:
-            bot.delete_message(chat_id, last_id)
-        except Exception:
-            pass
+    delete_message_safe(chat_id, last_id)
 
 @bot.message_handler(commands=['start', 'help'])
 def cmd_start(message):
@@ -134,8 +133,11 @@ def on_department(call):
     SESSIONS[user_id]["department"] = dep
     SESSIONS[user_id]["current_q"] = 0
 
-    q_text, _ = QUESTIONS[0]
+    # Удаляем и сохранённое предыдущее сообщение, и именно это сообщение с кнопками отделов
     delete_last_message(call.message.chat.id, user_id)
+    delete_message_safe(call.message.chat.id, call.message.message_id)
+
+    q_text, _ = QUESTIONS[0]
     sent = bot.send_message(
         call.message.chat.id,
         f"Отдел: <b>{dep}</b> ✅\n\n{q_text}",
@@ -150,9 +152,8 @@ def on_answer(call):
     if user_id not in SESSIONS:
         start_session(user_id)
 
-    payload = call.data
     try:
-        left, value = payload.split(":")
+        left, value = call.data.split(":")
         q_index = int(left[1:])
     except Exception:
         bot.answer_callback_query(call.id, "Ошибка данных.")
@@ -163,8 +164,12 @@ def on_answer(call):
     next_q = q_index + 1
     if next_q < len(QUESTIONS):
         SESSIONS[user_id]["current_q"] = next_q
-        q_text, _ = QUESTIONS[next_q]
+
+        # Удаляем и сохранённое предыдущее, и сообщение с текущими кнопками
         delete_last_message(call.message.chat.id, user_id)
+        delete_message_safe(call.message.chat.id, call.message.message_id)
+
+        q_text, _ = QUESTIONS[next_q]
         sent = bot.send_message(
             call.message.chat.id,
             q_text,
@@ -178,12 +183,9 @@ def on_answer(call):
         answers = SESSIONS[user_id]["answers"]
 
         now = datetime.now(SAMARA_TZ)
-        date_str = now.strftime(DATE_FORMAT)
-        time_str = now.strftime(TIME_FORMAT)
-
         row = {
-            "date": date_str,
-            "time": time_str,
+            "date": now.strftime(DATE_FORMAT),
+            "time": now.strftime(TIME_FORMAT),
             "user": name,
             "department": dep,
         }
@@ -191,21 +193,21 @@ def on_answer(call):
             row[colname] = answers.get(idx)
 
         ok, err = sheets.append_row(row)
+
+        # Удаляем последнее сообщение-вопрос и текущее сообщение с кнопками
         delete_last_message(call.message.chat.id, user_id)
+        delete_message_safe(call.message.chat.id, call.message.message_id)
+
         if ok:
-            sent = bot.send_message(
-                call.message.chat.id,
-                f"✅ Данные отправлены!\n"
+            text = (
+                "✅ Данные отправлены!\n"
                 f"Отдел: <b>{dep}</b>\n"
-                f"Дата: <b>{date_str}</b>, Время: <b>{time_str}</b>",
-                reply_markup=restart_keyboard()
+                f"Дата: <b>{row['date']}</b>, Время: <b>{row['time']}</b>"
             )
         else:
-            sent = bot.send_message(
-                call.message.chat.id,
-                f"❌ Не удалось записать данные: {err}",
-                reply_markup=restart_keyboard()
-            )
+            text = f"❌ Не удалось записать данные: {err}"
+
+        sent = bot.send_message(call.message.chat.id, text, reply_markup=restart_keyboard())
         SESSIONS[user_id]["last_msg_id"] = sent.message_id
         save_sessions()
 
