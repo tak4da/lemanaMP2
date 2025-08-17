@@ -24,7 +24,7 @@ from sheets import SheetClient
 
 # ===== Константы/настройки =====
 VERSION = "v1.6-inline-0-3-skipfix"
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7557353716:AAFo_rYUXohocp9N0axnoX9Nm-e0QYNsMr0")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7557353716:AAGQ5FlikZwRyH9imQLoh19XkDpPSIAxak0")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1VNLbyz58pWLm9wCQ5mhQar90dO4Y8kKpgRT8NfS7HVs")
 DATA_SHEET_NAME = os.getenv("DATA_SHEET_NAME", "data_bot")
 SESSIONS_FILE = "sessions.json"
