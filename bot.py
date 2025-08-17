@@ -2,13 +2,13 @@
 """
 Бот опроса: выбор 0–3.
 Изменения:
-1) Кнопки отделов (1–15) при старте.
-2) Кнопки выбора для показателей только 0–3.
+1) Кнопки отделов (1–15) теперь в виде Inline-кнопок по 5 в ряд (квадратные, как раньше).
+2) Кнопки выбора для показателей только 0–3 (Reply-кнопки).
 3) Для отделов 12–15 пропускается "карта ПРО" (ставится 0).
 4) Для отделов 3, 10, 11 пропускается "услуги" (ставится 0).
+5) Состояние пользователя сохраняется в sessions.json и восстанавливается.
 """
 import os
-import time
 import json
 from datetime import datetime
 import pytz
@@ -84,11 +84,10 @@ def start(message):
     }
     save_sessions()
 
-    # создаём клавиатуру с отделами 1–15
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    buttons = [str(i) for i in range(1, 16)]
-    for i in range(0, len(buttons), 5):
-        markup.add(*buttons[i:i+5])
+    # создаём inline-клавиатуру с отделами 1–15 (по 5 в ряд)
+    markup = types.InlineKeyboardMarkup(row_width=5)
+    buttons = [types.InlineKeyboardButton(str(i), callback_data=f"dept_{i}") for i in range(1, 16)]
+    markup.add(*buttons)
 
     bot.send_message(chat_id, "Выбери свой <b>номер отдела</b> (1–15):", reply_markup=markup)
 
@@ -98,7 +97,23 @@ def cancel(message):
     if chat_id in SESSIONS:
         del SESSIONS[chat_id]
         save_sessions()
-    bot.send_message(chat_id, "Опрос сброшен ❌")
+    bot.send_message(chat_id, "Опрос сброшен ❌", reply_markup=types.ReplyKeyboardRemove())
+
+# обработка выбора отдела
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dept_"))
+def handle_department(call):
+    chat_id = str(call.message.chat.id)
+    dept = int(call.data.split("_")[1])
+
+    if chat_id not in SESSIONS:
+        SESSIONS[chat_id] = {"step": 0, "data": {}}
+
+    state = SESSIONS[chat_id]
+    state["data"]["department"] = dept
+    state["step"] = 1
+    save_sessions()
+
+    bot.send_message(chat_id, QUESTIONS[0][0], reply_markup=get_keyboard())
 
 @bot.message_handler(func=lambda msg: True)
 def handler(message):
@@ -112,22 +127,7 @@ def handler(message):
     state = SESSIONS[chat_id]
     step = state["step"]
 
-    # шаг 0: выбор отдела
-    if step == 0:
-        try:
-            dept = int(text)
-            if 1 <= dept <= 15:
-                state["data"]["department"] = dept
-                state["step"] = 1
-                save_sessions()
-                bot.send_message(chat_id, QUESTIONS[0][0], reply_markup=get_keyboard())
-            else:
-                bot.send_message(chat_id, "Введи номер отдела от 1 до 15.")
-        except ValueError:
-            bot.send_message(chat_id, "Введи корректный номер отдела.")
-        return
-
-    # шаги 1+
+    # шаги начинаются с 1 (после выбора отдела)
     current_question, field_name = QUESTIONS[step - 1]
 
     # проверка для карт ПРО
@@ -158,13 +158,14 @@ def handler(message):
         save_sessions()
         next_q, _ = QUESTIONS[state["step"] - 1]
 
-        # проверяем, нужно ли пропускать карты ПРО или услуги
+        # пропуск ПРО
         if QUESTIONS[state["step"] - 1][1] == "keycards_pro" and state["data"]["department"] in DEPARTMENTS_WITHOUT_PRO:
             state["data"]["keycards_pro"] = 0
             state["step"] += 1
             save_sessions()
             next_q, _ = QUESTIONS[state["step"] - 1]
 
+        # пропуск услуг
         if QUESTIONS[state["step"] - 1][1] == "services" and state["data"]["department"] in DEPARTMENTS_WITHOUT_SERVICES:
             state["data"]["services"] = 0
             finish(chat_id, state)
