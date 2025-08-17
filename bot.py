@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Update bot.py: вывод данных в одном сообщении
-Бот опроса для MP-2 (Inline UI).
+Update bot.py: все вопросы в одном редактируемом сообщении + сводка.
 Ключевые моменты:
 - Выбор отдела 1–15: inline-кнопки по 5 в ряд.
-- Все ответы по метрикам: inline-кнопки 0–3 (без "Не актуально").
+- Все ответы: inline-кнопки 0–3.
 - Пропуски:
     * отделы 12–15: "карта ПРО" = 0, вопрос не задаётся;
     * отделы 3, 10, 11: "услуги" = 0, вопрос не задаётся.
 - Состояние пользователя хранится в sessions.json и переживает рестарт.
-- Запись в Google Sheets через SheetClient.append_row(dict) в порядке COLUMNS_ORDER.
+- После окончания — сводка + кнопка "Заполнить новые".
 - Команда /version покажет версию кода.
 """
 import os
@@ -23,9 +22,9 @@ from telebot.types import BotCommand
 from sheets import SheetClient
 
 # ===== Константы/настройки =====
-VERSION = "v1.6-inline-0-3-skipfix"
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7557353716:AAGQ5FlikZwRyH9imQLoh19XkDpPSIAxak0")
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1VNLbyz58pWLm9wCQ5mhQar90dO4Y8kKpgRT8NfS7HVs")
+VERSION = "v1.7-inline-editmsg-summary"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "YOUR_SPREADSHEET_ID")
 DATA_SHEET_NAME = os.getenv("DATA_SHEET_NAME", "data_bot")
 SESSIONS_FILE = "sessions.json"
 SAMARA_TZ = pytz.timezone("Europe/Samara")
@@ -86,7 +85,7 @@ def inline_value_keyboard():
 
 def init_session(chat_id: str, user_id: int, username: str):
     SESSIONS[chat_id] = {
-        "step": 0,  # 0 = ждём выбор отдела; 1..len(QUESTIONS) = текущий вопрос
+        "step": 0,
         "data": {
             "date": "", "time": "",
             "user": username or str(user_id),
@@ -96,12 +95,12 @@ def init_session(chat_id: str, user_id: int, username: str):
             "leads": None,
             "b2b_deals": None,
             "services": None,
+            "msg_id": None,
         }
     }
     save_sessions()
 
 def ask_current_question(chat_id: str):
-    """Показать текущий вопрос из state['step'] (1..N)."""
     state = SESSIONS.get(chat_id)
     if not state:
         return
@@ -109,14 +108,22 @@ def ask_current_question(chat_id: str):
     if step < 1 or step > len(QUESTIONS):
         return
     q_text, _ = QUESTIONS[step - 1]
-    # Дополнительно убираем любые старые reply-клавиатуры
-    bot.send_message(chat_id, q_text, reply_markup=inline_value_keyboard())
+    msg_id = state["data"].get("msg_id")
+    try:
+        if msg_id:
+            bot.edit_message_text(
+                q_text, chat_id, msg_id,
+                reply_markup=inline_value_keyboard()
+            )
+        else:
+            msg = bot.send_message(chat_id, q_text, reply_markup=inline_value_keyboard())
+            state["data"]["msg_id"] = msg.message_id
+    except Exception:
+        msg = bot.send_message(chat_id, q_text, reply_markup=inline_value_keyboard())
+        state["data"]["msg_id"] = msg.message_id
 
 def apply_skips(state: dict):
-    """Применить правила пропуска к следующему(им) вопросам.
-       Возвращает True, если после пропусков опрос завершён."""
     dept = state["data"]["department"]
-    # Пока следующий шаг надо пропустить — проставляем 0 и двигаемся дальше.
     while 1 <= state["step"] <= len(QUESTIONS):
         _, field = QUESTIONS[state["step"] - 1]
         if field == "keycards_pro" and dept in DEPARTMENTS_WITHOUT_PRO:
@@ -127,9 +134,7 @@ def apply_skips(state: dict):
             state["data"]["services"] = 0
             state["step"] += 1
             continue
-        break  # дальше спрашиваем обычно
-
-    # Проверка на завершение
+        break
     return state["step"] > len(QUESTIONS)
 
 @bot.message_handler(commands=["version"])
@@ -140,12 +145,13 @@ def version_cmd(message):
 def start_cmd(message):
     chat_id = str(message.chat.id)
     init_session(chat_id, message.from_user.id, message.from_user.username or "")
-    # Показать выбор отдела inline
-    bot.send_message(
+    msg = bot.send_message(
         chat_id,
         "Выбери свой <b>номер отдела</b> (1–15):",
         reply_markup=inline_dept_keyboard()
     )
+    SESSIONS[chat_id]["data"]["msg_id"] = msg.message_id
+    save_sessions()
 
 @bot.message_handler(commands=["cancel"])
 def cancel_cmd(message):
@@ -153,28 +159,27 @@ def cancel_cmd(message):
     if chat_id in SESSIONS:
         del SESSIONS[chat_id]
         save_sessions()
-    # Уберём любые reply-клавиатуры
     bot.send_message(chat_id, "Опрос сброшен ❌", reply_markup=types.ReplyKeyboardRemove())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("dept:"))
 def cb_dept(c):
     chat_id = str(c.message.chat.id)
     dept = int(c.data.split(":")[1])
-
-    # Если сессии нет — инициализируем
     if chat_id not in SESSIONS:
         init_session(chat_id, c.from_user.id, c.from_user.username or "")
-
     SESSIONS[chat_id]["data"]["department"] = dept
-    SESSIONS[chat_id]["step"] = 1  # первый вопрос
+    SESSIONS[chat_id]["step"] = 1
     save_sessions()
-
     bot.answer_callback_query(c.id, f"Отдел выбран: {dept}")
-    bot.send_message(chat_id, f"Отдел: {dept} ✅")
-    # Применить возможные пропуски (на случай если первый вопрос сразу должен скипнуться — у нас такого нет, но пусть будет унифицировано)
+    bot.edit_message_text(
+        f"Отдел {dept} ✅",
+        chat_id,
+        c.message.message_id
+    )
+    SESSIONS[chat_id]["data"]["msg_id"] = c.message.message_id
     done = apply_skips(SESSIONS[chat_id])
     if done:
-        finish(chat_id)  # маловероятно здесь
+        finish(chat_id)
     else:
         ask_current_question(chat_id)
 
@@ -182,27 +187,20 @@ def cb_dept(c):
 def cb_value(c):
     chat_id = str(c.message.chat.id)
     val = int(c.data.split(":")[1])
-
     if chat_id not in SESSIONS:
         bot.answer_callback_query(c.id, "Сессия не найдена, нажми /start")
         return
-
     state = SESSIONS[chat_id]
     step = state["step"]
     if step < 1 or step > len(QUESTIONS):
         bot.answer_callback_query(c.id, "Нет активного вопроса, нажми /start")
         return
-
-    # Сохраняем ответ для текущего вопроса
     _, field = QUESTIONS[step - 1]
     state["data"][field] = val
     state["step"] += 1
     save_sessions()
-
-    # Применить пропуски к последующим шагам
     done = apply_skips(state)
     save_sessions()
-
     if done:
         finish(chat_id)
     else:
@@ -212,23 +210,45 @@ def finish(chat_id: str):
     state = SESSIONS.get(chat_id)
     if not state:
         return
-
     now = datetime.now(SAMARA_TZ)
     state["data"]["date"] = now.strftime(DATE_FORMAT)
     state["data"]["time"] = now.strftime(TIME_FORMAT)
-
-    # Пишем именно dict (как ожидает SheetClient.append_row)
     data_to_save = state["data"].copy()
     ok, err = sheets.append_row(data_to_save)
+    summary = (
+        f"<b>Отдел {state['data']['department']}</b>\n\n"
+        f"Ключ-карты дом: {state['data']['keycards_home']}\n"
+        f"Ключ-карты ПРО: {state['data']['keycards_pro']}\n"
+        f"Лиды: {state['data']['leads']}\n"
+        f"B2B акции: {state['data']['b2b_deals']}\n"
+        f"Услуги: {state['data']['services']}\n\n"
+        f"Дата: {state['data']['date']} {state['data']['time']}"
+    )
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("Заполнить новые", callback_data="new_session"))
+    try:
+        bot.edit_message_text(summary, chat_id, state["data"]["msg_id"], reply_markup=kb)
+    except Exception:
+        msg = bot.send_message(chat_id, summary, reply_markup=kb)
+        state["data"]["msg_id"] = msg.message_id
     if not ok:
         bot.send_message(chat_id, f"Ошибка записи в таблицу: {err}")
-    else:
-        bot.send_message(chat_id, "Спасибо! Данные сохранены ✅")
-
-    # Очистим сессию
     if chat_id in SESSIONS:
         del SESSIONS[chat_id]
         save_sessions()
+
+@bot.callback_query_handler(func=lambda c: c.data == "new_session")
+def cb_new_session(c):
+    chat_id = str(c.message.chat.id)
+    init_session(chat_id, c.from_user.id, c.from_user.username or "")
+    bot.edit_message_text(
+        "Выбери свой <b>номер отдела</b> (1–15):",
+        chat_id,
+        c.message.message_id,
+        reply_markup=inline_dept_keyboard()
+    )
+    SESSIONS[chat_id]["data"]["msg_id"] = c.message.message_id
+    save_sessions()
 
 if __name__ == "__main__":
     print(f"Бот запущен... {VERSION}")
