@@ -2,11 +2,11 @@
 """
 Бот опроса: выбор 0–3.
 Изменения:
-1) Кнопки отделов (1–15) теперь в виде Inline-кнопок по 5 в ряд (квадратные, как раньше).
-2) Кнопки выбора для показателей только 0–3 (Reply-кнопки).
+1) Кнопки отделов (1–15) в виде Inline-кнопок по 5 в ряд (квадратные).
+2) Кнопки выбора показателей тоже Inline-кнопки (0–3).
 3) Для отделов 12–15 пропускается "карта ПРО" (ставится 0).
 4) Для отделов 3, 10, 11 пропускается "услуги" (ставится 0).
-5) Состояние пользователя сохраняется в sessions.json и восстанавливается.
+5) Состояние сохраняется в sessions.json.
 """
 import os
 import json
@@ -69,9 +69,14 @@ DEPARTMENTS_WITHOUT_SERVICES = [3, 10, 11]
 # Отделы, где карты ПРО всегда = 0
 DEPARTMENTS_WITHOUT_PRO = [12, 13, 14, 15]
 
-def get_keyboard():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    buttons = ["0", "1", "2", "3"]
+def get_value_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=4)
+    buttons = [
+        types.InlineKeyboardButton("0", callback_data="val_0"),
+        types.InlineKeyboardButton("1", callback_data="val_1"),
+        types.InlineKeyboardButton("2", callback_data="val_2"),
+        types.InlineKeyboardButton("3", callback_data="val_3"),
+    ]
     markup.add(*buttons)
     return markup
 
@@ -97,7 +102,7 @@ def cancel(message):
     if chat_id in SESSIONS:
         del SESSIONS[chat_id]
         save_sessions()
-    bot.send_message(chat_id, "Опрос сброшен ❌", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(chat_id, "Опрос сброшен ❌")
 
 # обработка выбора отдела
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dept_"))
@@ -113,65 +118,59 @@ def handle_department(call):
     state["step"] = 1
     save_sessions()
 
-    bot.send_message(chat_id, QUESTIONS[0][0], reply_markup=get_keyboard())
+    bot.send_message(chat_id, f"Отдел: {dept} ✅\n{QUESTIONS[0][0]}", reply_markup=get_value_keyboard())
 
-@bot.message_handler(func=lambda msg: True)
-def handler(message):
-    chat_id = str(message.chat.id)
-    text = message.text.strip()
+# обработка значений 0–3
+@bot.callback_query_handler(func=lambda call: call.data.startswith("val_"))
+def handle_value(call):
+    chat_id = str(call.message.chat.id)
+    val = int(call.data.split("_")[1])
 
     if chat_id not in SESSIONS:
-        bot.send_message(chat_id, "Нажми /start чтобы начать.")
+        bot.send_message(chat_id, "Начни заново: /start")
         return
 
     state = SESSIONS[chat_id]
     step = state["step"]
-
-    # шаги начинаются с 1 (после выбора отдела)
     current_question, field_name = QUESTIONS[step - 1]
+    dept = state["data"]["department"]
 
-    # проверка для карт ПРО
-    if field_name == "keycards_pro" and state["data"]["department"] in DEPARTMENTS_WITHOUT_PRO:
+    # сохраняем значение
+    state["data"][field_name] = val
+
+    # проверка для карт ПРО (пропуск)
+    if field_name == "keycards_home" and dept in DEPARTMENTS_WITHOUT_PRO:
         state["data"]["keycards_pro"] = 0
-        state["step"] += 1
-        save_sessions()
-        next_q, _ = QUESTIONS[state["step"] - 1]
-        bot.send_message(chat_id, next_q, reply_markup=get_keyboard())
-        return
+        step += 1
 
-    # проверка для услуг
-    if field_name == "services" and state["data"]["department"] in DEPARTMENTS_WITHOUT_SERVICES:
+    # проверка для услуг (пропуск)
+    if field_name == "b2b_deals" and dept in DEPARTMENTS_WITHOUT_SERVICES:
         state["data"]["services"] = 0
         finish(chat_id, state)
         return
 
-    if text not in ["0", "1", "2", "3"]:
-        bot.send_message(chat_id, "Выбирай только кнопки 0–3.")
-        return
-
-    state["data"][field_name] = int(text)
-
-    if step == len(QUESTIONS):
+    # шаги дальше
+    if step >= len(QUESTIONS):
         finish(chat_id, state)
     else:
-        state["step"] += 1
+        state["step"] = step + 1
         save_sessions()
         next_q, _ = QUESTIONS[state["step"] - 1]
 
-        # пропуск ПРО
-        if QUESTIONS[state["step"] - 1][1] == "keycards_pro" and state["data"]["department"] in DEPARTMENTS_WITHOUT_PRO:
+        # проверка для карт ПРО на этом этапе
+        if QUESTIONS[state["step"] - 1][1] == "keycards_pro" and dept in DEPARTMENTS_WITHOUT_PRO:
             state["data"]["keycards_pro"] = 0
             state["step"] += 1
             save_sessions()
             next_q, _ = QUESTIONS[state["step"] - 1]
 
-        # пропуск услуг
-        if QUESTIONS[state["step"] - 1][1] == "services" and state["data"]["department"] in DEPARTMENTS_WITHOUT_SERVICES:
+        # проверка для услуг на этом этапе
+        if QUESTIONS[state["step"] - 1][1] == "services" and dept in DEPARTMENTS_WITHOUT_SERVICES:
             state["data"]["services"] = 0
             finish(chat_id, state)
             return
 
-        bot.send_message(chat_id, next_q, reply_markup=get_keyboard())
+        bot.send_message(chat_id, next_q, reply_markup=get_value_keyboard())
 
 def finish(chat_id, state):
     data = state["data"]
@@ -181,7 +180,7 @@ def finish(chat_id, state):
     sheets.append_row(list(data.values()))
     del SESSIONS[chat_id]
     save_sessions()
-    bot.send_message(chat_id, "Спасибо! Данные сохранены ✅", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(chat_id, "Спасибо! Данные сохранены ✅")
 
 if __name__ == "__main__":
     print("Бот запущен...")
