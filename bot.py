@@ -1,9 +1,9 @@
-
 # -*- coding: utf-8 -*-
 """
-Бот опроса с выбором 1–3 и кнопкой "Не актуально".
-Фикс: не зависает сообщение выбора отдела — мы удаляем сообщение,
-с которого пришёл callback (dep/q), плюс последнее сохранённое.
+Бот опроса: выбор 0–3.
+Изменения:
+1) Кнопка "Не актуально" убрана, теперь кнопки от 0 до 3.
+2) Для отделов 3, 10, 11 вопрос "Услуги" пропускается, в таблицу пишется 0.
 """
 import os
 import time
@@ -53,6 +53,7 @@ def save_sessions():
 
 SESSIONS = load_sessions()
 
+# Вопросы и имена столбцов
 QUESTIONS = [
     ("Сколько <b>ключ-карт для дома</b> ты сегодня выдал(а)?", "keycards_home"),
     ("Сколько <b>ключ-карт ПРО</b> ты сегодня выдал(а)?", "keycards_pro"),
@@ -60,163 +61,101 @@ QUESTIONS = [
     ("Сколько <b>акций для B2B</b> ты сегодня продал(а)?", "b2b_deals"),
     ("Сколько <b>услуг</b> ты сегодня продал(а)?", "services"),
 ]
+# Индекс вопроса "Услуги"
+SERVICES_INDEX = next(i for i, q in enumerate(QUESTIONS) if q[1] == "services")
 
-def answer_keyboard(q_index: int) -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup()
-    kb.row(
-        types.InlineKeyboardButton("1", callback_data=f"q{q_index}:1"),
-        types.InlineKeyboardButton("2", callback_data=f"q{q_index}:2"),
-        types.InlineKeyboardButton("3", callback_data=f"q{q_index}:3"),
-    )
-    kb.row(types.InlineKeyboardButton("Не актуально", callback_data=f"q{q_index}:na"))
-    return kb
+# Отделы, где услуги = 0
+DEPARTMENTS_WITHOUT_SERVICES = [3, 10, 11]
 
-def department_keyboard() -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=5)
-    buttons = [types.InlineKeyboardButton(str(i), callback_data=f"dep:{i}") for i in range(1, 16)]
-    kb.add(*buttons)
-    return kb
+def get_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    buttons = ["0", "1", "2", "3"]
+    markup.add(*buttons)
+    return markup
 
-def restart_keyboard() -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📝 ЗАПОЛНИТЬ НОВЫЕ", callback_data="start_new"))
-    return kb
-
-def start_session(user_id: str):
-    SESSIONS[user_id] = {
-        "department": None,
-        "answers": {},
-        "current_q": 0,
-        "start_ts": time.time(),
-        "last_msg_id": None
+@bot.message_handler(commands=["start"])
+def start(message):
+    chat_id = str(message.chat.id)
+    SESSIONS[chat_id] = {
+        "step": 0,
+        "data": {"department": None}
     }
     save_sessions()
+    bot.send_message(chat_id, "Выбери свой <b>номер отдела</b> (1–15):")
 
-def get_username(message):
-    return message.from_user.full_name or message.from_user.username or str(message.from_user.id)
-
-def delete_message_safe(chat_id, message_id):
-    if not message_id:
-        return
-    try:
-        bot.delete_message(chat_id, message_id)
-    except Exception:
-        pass
-
-def delete_last_message(chat_id, user_id: str):
-    last_id = SESSIONS.get(user_id, {}).get("last_msg_id")
-    delete_message_safe(chat_id, last_id)
-
-@bot.message_handler(commands=['start', 'help'])
-def cmd_start(message):
-    user_id = str(message.from_user.id)
-    start_session(user_id)
-    delete_last_message(message.chat.id, user_id)
-    sent = bot.send_message(
-        message.chat.id,
-        "Привет! 👋\nВыбери свой <b>отдел</b> (1–15):",
-        reply_markup=department_keyboard()
-    )
-    SESSIONS[user_id]["last_msg_id"] = sent.message_id
-    save_sessions()
-
-@bot.callback_query_handler(func=lambda c: c.data == "start_new")
-def on_start_new(call):
-    cmd_start(call.message)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("dep:"))
-def on_department(call):
-    user_id = str(call.from_user.id)
-    dep = call.data.split(":")[1]
-    if user_id not in SESSIONS:
-        start_session(user_id)
-    SESSIONS[user_id]["department"] = dep
-    SESSIONS[user_id]["current_q"] = 0
-
-    # Удаляем и сохранённое предыдущее сообщение, и именно это сообщение с кнопками отделов
-    delete_last_message(call.message.chat.id, user_id)
-    delete_message_safe(call.message.chat.id, call.message.message_id)
-
-    q_text, _ = QUESTIONS[0]
-    sent = bot.send_message(
-        call.message.chat.id,
-        f"Отдел: <b>{dep}</b> ✅\n\n{q_text}",
-        reply_markup=answer_keyboard(0)
-    )
-    SESSIONS[user_id]["last_msg_id"] = sent.message_id
-    save_sessions()
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("q"))
-def on_answer(call):
-    user_id = str(call.from_user.id)
-    if user_id not in SESSIONS:
-        start_session(user_id)
-
-    try:
-        left, value = call.data.split(":")
-        q_index = int(left[1:])
-    except Exception:
-        bot.answer_callback_query(call.id, "Ошибка данных.")
-        return
-
-    SESSIONS[user_id]["answers"][q_index] = None if value == "na" else int(value)
-
-    next_q = q_index + 1
-    if next_q < len(QUESTIONS):
-        SESSIONS[user_id]["current_q"] = next_q
-
-        # Удаляем и сохранённое предыдущее, и сообщение с текущими кнопками
-        delete_last_message(call.message.chat.id, user_id)
-        delete_message_safe(call.message.chat.id, call.message.message_id)
-
-        q_text, _ = QUESTIONS[next_q]
-        sent = bot.send_message(
-            call.message.chat.id,
-            q_text,
-            reply_markup=answer_keyboard(next_q)
-        )
-        SESSIONS[user_id]["last_msg_id"] = sent.message_id
+@bot.message_handler(commands=["cancel"])
+def cancel(message):
+    chat_id = str(message.chat.id)
+    if chat_id in SESSIONS:
+        del SESSIONS[chat_id]
         save_sessions()
+    bot.send_message(chat_id, "Опрос сброшен ❌")
+
+@bot.message_handler(func=lambda msg: True)
+def handler(message):
+    chat_id = str(message.chat.id)
+    text = message.text.strip()
+
+    if chat_id not in SESSIONS:
+        bot.send_message(chat_id, "Нажми /start чтобы начать.")
+        return
+
+    state = SESSIONS[chat_id]
+    step = state["step"]
+
+    # шаг 0: выбор отдела
+    if step == 0:
+        try:
+            dept = int(text)
+            if 1 <= dept <= 15:
+                state["data"]["department"] = dept
+                state["step"] = 1
+                save_sessions()
+                bot.send_message(chat_id, QUESTIONS[0][0], reply_markup=get_keyboard())
+            else:
+                bot.send_message(chat_id, "Введи номер отдела от 1 до 15.")
+        except ValueError:
+            bot.send_message(chat_id, "Введи корректный номер отдела.")
+        return
+
+    # шаги 1+
+    current_question, field_name = QUESTIONS[step - 1]
+
+    # проверка для услуг
+    if field_name == "services" and state["data"]["department"] in DEPARTMENTS_WITHOUT_SERVICES:
+        state["data"]["services"] = 0
+        finish(chat_id, state)
+        return
+
+    if text not in ["0", "1", "2", "3"]:
+        bot.send_message(chat_id, "Выбирай только кнопки 0–3.")
+        return
+
+    state["data"][field_name] = int(text)
+
+    if step == len(QUESTIONS):
+        finish(chat_id, state)
     else:
-        name = get_username(call.message)
-        dep = SESSIONS[user_id]["department"]
-        answers = SESSIONS[user_id]["answers"]
-
-        now = datetime.now(SAMARA_TZ)
-        row = {
-            "date": now.strftime(DATE_FORMAT),
-            "time": now.strftime(TIME_FORMAT),
-            "user": name,
-            "department": dep,
-        }
-        for idx, (_qtext, colname) in enumerate(QUESTIONS):
-            row[colname] = answers.get(idx)
-
-        ok, err = sheets.append_row(row)
-
-        # Удаляем последнее сообщение-вопрос и текущее сообщение с кнопками
-        delete_last_message(call.message.chat.id, user_id)
-        delete_message_safe(call.message.chat.id, call.message.message_id)
-
-        if ok:
-            text = (
-                "✅ Данные отправлены!\n"
-                f"Отдел: <b>{dep}</b>\n"
-                f"Дата: <b>{row['date']}</b>, Время: <b>{row['time']}</b>"
-            )
-        else:
-            text = f"❌ Не удалось записать данные: {err}"
-
-        sent = bot.send_message(call.message.chat.id, text, reply_markup=restart_keyboard())
-        SESSIONS[user_id]["last_msg_id"] = sent.message_id
+        state["step"] += 1
         save_sessions()
+        next_q, _ = QUESTIONS[state["step"] - 1]
+        # проверяем, нужно ли показывать услуги
+        if (state["step"] - 1) == SERVICES_INDEX and state["data"]["department"] in DEPARTMENTS_WITHOUT_SERVICES:
+            state["data"]["services"] = 0
+            finish(chat_id, state)
+        else:
+            bot.send_message(chat_id, next_q, reply_markup=get_keyboard())
 
-@bot.message_handler(commands=['cancel'])
-def cmd_cancel(message):
-    user_id = str(message.from_user.id)
-    start_session(user_id)
-    bot.reply_to(message, "Опрос сброшен. Нажми /start чтобы начать заново.")
+def finish(chat_id, state):
+    data = state["data"]
+    now = datetime.now(SAMARA_TZ)
+    data["date"] = now.strftime(DATE_FORMAT)
+    data["time"] = now.strftime(TIME_FORMAT)
+    sheets.append_row(list(data.values()))
+    del SESSIONS[chat_id]
+    save_sessions()
+    bot.send_message(chat_id, "Спасибо! Данные сохранены ✅", reply_markup=types.ReplyKeyboardRemove())
 
 if __name__ == "__main__":
-    print("Bot is running...")
-    bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=50)
+    print("Бот запущен...")
+    bot.infinity_polling()
