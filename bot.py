@@ -22,7 +22,7 @@ from telebot.types import BotCommand
 from sheets import SheetClient
 
 # ===== Константы/настройки =====
-VERSION = "v1.7-inline-editmsg-summary"
+VERSION = "v1.7-inline-editmsg-summary-datenorm"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7557353716:AAGQ5FlikZwRyH9imQLoh19XkDpPSIAxak0")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1VNLbyz58pWLm9wCQ5mhQar90dO4Y8kKpgRT8NfS7HVs")
 DATA_SHEET_NAME = os.getenv("DATA_SHEET_NAME", "data_bot")
@@ -88,6 +88,7 @@ def init_session(chat_id: str, user_id: int, username: str):
         "step": 0,
         "data": {
             "date": "", "time": "",
+            "date_norm": "", "time_norm": "",
             "user": username or str(user_id),
             "department": None,
             "keycards_home": None,
@@ -211,8 +212,11 @@ def finish(chat_id: str):
     if not state:
         return
     now = datetime.now(SAMARA_TZ)
+    # сохраняем в оба формата
     state["data"]["date"] = now.strftime(DATE_FORMAT)
     state["data"]["time"] = now.strftime(TIME_FORMAT)
+    state["data"]["date_norm"] = now.strftime("%Y-%m-%d")
+    state["data"]["time_norm"] = now.strftime("%H:%M:%S")
     data_to_save = state["data"].copy()
     ok, err = sheets.append_row(data_to_save)
     summary = (
