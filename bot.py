@@ -2,8 +2,10 @@
 """
 Бот опроса: выбор 0–3.
 Изменения:
-1) Кнопка "Не актуально" убрана, теперь кнопки от 0 до 3.
-2) Для отделов 3, 10, 11 вопрос "Услуги" пропускается, в таблицу пишется 0.
+1) Кнопки отделов (1–15) при старте.
+2) Кнопки выбора для показателей только 0–3.
+3) Для отделов 12–15 пропускается "карта ПРО" (ставится 0).
+4) Для отделов 3, 10, 11 пропускается "услуги" (ставится 0).
 """
 import os
 import time
@@ -61,11 +63,11 @@ QUESTIONS = [
     ("Сколько <b>акций для B2B</b> ты сегодня продал(а)?", "b2b_deals"),
     ("Сколько <b>услуг</b> ты сегодня продал(а)?", "services"),
 ]
-# Индекс вопроса "Услуги"
-SERVICES_INDEX = next(i for i, q in enumerate(QUESTIONS) if q[1] == "services")
 
-# Отделы, где услуги = 0
+# Отделы, где услуги всегда = 0
 DEPARTMENTS_WITHOUT_SERVICES = [3, 10, 11]
+# Отделы, где карты ПРО всегда = 0
+DEPARTMENTS_WITHOUT_PRO = [12, 13, 14, 15]
 
 def get_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -81,7 +83,14 @@ def start(message):
         "data": {"department": None}
     }
     save_sessions()
-    bot.send_message(chat_id, "Выбери свой <b>номер отдела</b> (1–15):")
+
+    # создаём клавиатуру с отделами 1–15
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    buttons = [str(i) for i in range(1, 16)]
+    for i in range(0, len(buttons), 5):
+        markup.add(*buttons[i:i+5])
+
+    bot.send_message(chat_id, "Выбери свой <b>номер отдела</b> (1–15):", reply_markup=markup)
 
 @bot.message_handler(commands=["cancel"])
 def cancel(message):
@@ -121,6 +130,15 @@ def handler(message):
     # шаги 1+
     current_question, field_name = QUESTIONS[step - 1]
 
+    # проверка для карт ПРО
+    if field_name == "keycards_pro" and state["data"]["department"] in DEPARTMENTS_WITHOUT_PRO:
+        state["data"]["keycards_pro"] = 0
+        state["step"] += 1
+        save_sessions()
+        next_q, _ = QUESTIONS[state["step"] - 1]
+        bot.send_message(chat_id, next_q, reply_markup=get_keyboard())
+        return
+
     # проверка для услуг
     if field_name == "services" and state["data"]["department"] in DEPARTMENTS_WITHOUT_SERVICES:
         state["data"]["services"] = 0
@@ -139,12 +157,20 @@ def handler(message):
         state["step"] += 1
         save_sessions()
         next_q, _ = QUESTIONS[state["step"] - 1]
-        # проверяем, нужно ли показывать услуги
-        if (state["step"] - 1) == SERVICES_INDEX and state["data"]["department"] in DEPARTMENTS_WITHOUT_SERVICES:
+
+        # проверяем, нужно ли пропускать карты ПРО или услуги
+        if QUESTIONS[state["step"] - 1][1] == "keycards_pro" and state["data"]["department"] in DEPARTMENTS_WITHOUT_PRO:
+            state["data"]["keycards_pro"] = 0
+            state["step"] += 1
+            save_sessions()
+            next_q, _ = QUESTIONS[state["step"] - 1]
+
+        if QUESTIONS[state["step"] - 1][1] == "services" and state["data"]["department"] in DEPARTMENTS_WITHOUT_SERVICES:
             state["data"]["services"] = 0
             finish(chat_id, state)
-        else:
-            bot.send_message(chat_id, next_q, reply_markup=get_keyboard())
+            return
+
+        bot.send_message(chat_id, next_q, reply_markup=get_keyboard())
 
 def finish(chat_id, state):
     data = state["data"]
