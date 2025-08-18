@@ -22,7 +22,7 @@ from telebot.types import BotCommand
 from sheets import SheetClient
 
 # ===== Константы/настройки =====
-VERSION = "v1.7-inline-editmsg-summary-datenorm"
+VERSION = "v1.7-inline-editmsg-summary-datenorm-noB2B"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7557353716:AAGQ5FlikZwRyH9imQLoh19XkDpPSIAxak0")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1VNLbyz58pWLm9wCQ5mhQar90dO4Y8kKpgRT8NfS7HVs")
 DATA_SHEET_NAME = os.getenv("DATA_SHEET_NAME", "data_bot")
@@ -66,7 +66,6 @@ QUESTIONS = [
     ("Сколько <b>ключ-карт для дома</b> ты сегодня выдал(а)?", "keycards_home"),
     ("Сколько <b>ключ-карт ПРО</b> ты сегодня выдал(а)?", "keycards_pro"),
     ("Сколько <b>лидов</b> ты сегодня сгенерил(а)?", "leads"),
-    ("Сколько <b>акций для B2B</b> ты сегодня продал(а)?", "b2b_deals"),
     ("Сколько <b>услуг</b> ты сегодня продал(а)?", "services"),
 ]
 
@@ -94,7 +93,6 @@ def init_session(chat_id: str, user_id: int, username: str):
             "keycards_home": None,
             "keycards_pro": None,
             "leads": None,
-            "b2b_deals": None,
             "services": None,
             "msg_id": None,
         }
@@ -224,7 +222,6 @@ def finish(chat_id: str):
         f"Ключ-карты дом: {state['data']['keycards_home']}\n"
         f"Ключ-карты ПРО: {state['data']['keycards_pro']}\n"
         f"Лиды: {state['data']['leads']}\n"
-        f"B2B акции: {state['data']['b2b_deals']}\n"
         f"Услуги: {state['data']['services']}\n\n"
         f"Дата: {state['data']['date']} {state['data']['time']}"
     )
